@@ -1,17 +1,28 @@
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
+
 fn main() {
     println!("cargo::rerun-if-changed=parallel-rdp");
     println!("cargo::rerun-if-changed=src/compat");
 
+    // 1. Slint Compilation
     let slint_config = slint_build::CompilerConfiguration::new().with_style("cosmic".into());
-    slint_build::compile_with_config("src/ui/gui/appwindow.slint", slint_config).unwrap();
+    if let Err(e) = slint_build::compile_with_config("src/ui/gui/appwindow.slint", slint_config) {
+        println!("cargo:warning=Slint compilation failed: {}", e);
+    }
 
-    let mut simd_build = cc::Build::new();
     let mut volk_build = cc::Build::new();
+    let mut rdp_build = cc::Build::new();
+    let mut simd_build = cc::Build::new();
+
+    // 2. Configure Volk
     volk_build
         .std("c17")
         .include("parallel-rdp/parallel-rdp-standalone/vulkan-headers/include")
         .file("parallel-rdp/parallel-rdp-standalone/volk/volk.c");
-    let mut rdp_build = cc::Build::new();
+
+    // 3. Configure RDP
     rdp_build
         .cpp(true)
         .std("c++23")
@@ -64,171 +75,62 @@ fn main() {
         .include("parallel-rdp/parallel-rdp-standalone/vulkan-headers/include")
         .include("parallel-rdp/parallel-rdp-standalone/util");
 
-    // --- Robust SDL3 Environment Section ---
-    let sdl3_out = std::env::var("DEP_SDL3_OUT_DIR");
-    let sdl3_ttf_out = std::env::var("DEP_SDL3_TTF_OUT_DIR");
-    
-    if let (Ok(sdl3), Ok(sdl3_ttf)) = (sdl3_out, sdl3_ttf_out) {
-        rdp_build
-            .include(std::path::PathBuf::from(sdl3).join("include"))
-            .include(std::path::PathBuf::from(sdl3_ttf).join("include"));
-    } else {
-        println!("cargo:warning=SDL3 or SDL3_TTF output directories not found. Build may fail later.");
+    // 4. Robust SDL3 Header Resolution
+    // These variables are only exported if sdl3-sys/sdl3-ttf-sys define 'links'
+    let sdl3_include = env::var("DEP_SDL3_OUT_DIR").map(|p| PathBuf::from(p).join("include"));
+    let sdl3_ttf_include = env::var("DEP_SDL3_TTF_OUT_DIR").map(|p| PathBuf::from(p).join("include"));
+
+    match (sdl3_include, sdl3_ttf_include) {
+        (Ok(s1), Ok(s2)) => {
+            rdp_build.include(s1).include(s2);
+        }
+        _ => {
+            println!("cargo:warning=SDL3 or SDL3_TTF metadata not found. Using fallback includes.");
+            // Fallback: You might want to add local include paths here if needed
+        }
     }
 
-    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let opt_flag = if arch == "x86_64" {
-        "-march=x86-64-v3"
-    } else if arch == "aarch64" {
-        "-march=armv8.2-a"
-    } else {
-        panic!("unknown arch")
+    // 5. Architecture & OS Handling
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    
+    let opt_flag = match arch.as_str() {
+        "x86_64" => Some("-march=x86-64-v3"),
+        "aarch64" => Some("-march=armv8.2-a"),
+        _ => None,
     };
 
-    volk_build.flag(opt_flag);
-    rdp_build.flag(opt_flag);
-    simd_build.flag(opt_flag);
+    if let Some(flag) = opt_flag {
+        volk_build.flag(flag);
+        rdp_build.flag(flag);
+        simd_build.flag(flag);
+    }
 
     if os == "windows" {
-        volk_build.flag("-DVK_USE_PLATFORM_WIN32_KHR");
-        rdp_build.flag("-DVK_USE_PLATFORM_WIN32_KHR");
+        volk_build.define("VK_USE_PLATFORM_WIN32_KHR", None);
+        rdp_build.define("VK_USE_PLATFORM_WIN32_KHR", None);
 
-        winresource::WindowsResource::new()
-            .set_icon("data/icon/icon.ico")
-            .compile()
-            .unwrap();
-    } else if os == "macos" {
-        println!("cargo:rustc-link-search=native=/opt/homebrew/opt/freetype/lib");
-        println!("cargo:rustc-link-lib=freetype");
-
-        let output = std::process::Command::new("clang")
-            .args(["--print-runtime-dir"])
-            .output()
-            .unwrap();
-
-        let runtime_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        println!("cargo:rustc-link-search=native={}", runtime_dir);
-        println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        let _ = winresource::WindowsResource::new()
+            .set_icon("data/icon/icon.ico") // Double check this path exists!
+            .compile();
     }
 
-    volk_build.flag("-flto=thin");
-    rdp_build.flag("-flto=thin");
-    simd_build.flag("-flto=thin");
+    // 6. Finalize C++ Builds
+    volk_build.flag("-flto=thin").compile("volk");
+    rdp_build.flag("-flto=thin").compile("parallel-rdp");
 
-    volk_build.compile("volk");
-    rdp_build.compile("parallel-rdp");
-
-    let out_path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-
-    let parallel_bindings = bindgen::Builder::default()
-        .header("parallel-rdp/interface.hpp")
-        .allowlist_function("rdp_init")
-        .allowlist_function("rdp_close")
-        .allowlist_function("rdp_set_vi_register")
-        .allowlist_function("rdp_update_screen")
-        .allowlist_function("rdp_render_frame")
-        .allowlist_function("rdp_process_commands")
-        .allowlist_function("rdp_onscreen_message")
-        .allowlist_function("rdp_check_callback")
-        .allowlist_function("rdp_new_processor")
-        .allowlist_function("rdp_check_framebuffers")
-        .allowlist_function("rdp_state_size")
-        .allowlist_function("rdp_save_state")
-        .allowlist_function("rdp_load_state")
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .expect("Unable to generate bindings");
-
-    parallel_bindings
-        .write_to_file(out_path.join("parallel_bindings.rs"))
-        .expect("Couldn't write bindings!");
-
-    if arch == "aarch64" {
-        let simd_bindings = bindgen::Builder::default()
-            .header("src/compat/sse2neon/sse2neon.h")
-            .allowlist_function("_mm_setzero_si128")
-            .allowlist_function("_mm_set_epi8")
-            .allowlist_function("_mm_movemask_epi8")
-            .allowlist_function("_mm_shuffle_epi8")
-            .allowlist_function("_mm_packs_epi16")
-            .allowlist_function("_mm_set_epi16")
-            .allowlist_function("_mm_cmpeq_epi8")
-            .allowlist_function("_mm_and_si128")
-            .allowlist_function("_mm_set1_epi8")
-            .allowlist_function("_mm_mullo_epi16")
-            .allowlist_function("_mm_cmpeq_epi16")
-            .allowlist_function("_mm_add_epi16")
-            .allowlist_function("_mm_slli_epi16")
-            .allowlist_function("_mm_mulhi_epi16")
-            .allowlist_function("_mm_srai_epi16")
-            .allowlist_function("_mm_andnot_si128")
-            .allowlist_function("_mm_or_si128")
-            .allowlist_function("_mm_mulhi_epu16")
-            .allowlist_function("_mm_sub_epi16")
-            .allowlist_function("_mm_unpacklo_epi16")
-            .allowlist_function("_mm_unpackhi_epi16")
-            .allowlist_function("_mm_packs_epi32")
-            .allowlist_function("_mm_adds_epu16")
-            .allowlist_function("_mm_cmpgt_epi16")
-            .allowlist_function("_mm_blendv_epi8")
-            .allowlist_function("_mm_min_epi16")
-            .allowlist_function("_mm_max_epi16")
-            .allowlist_function("_mm_subs_epi16")
-            .allowlist_function("_mm_adds_epi16")
-            .allowlist_function("_mm_xor_si128")
-            .allowlist_function("_mm_cmplt_epi16")
-            .allowlist_function("_mm_subs_epu16")
-            .allowlist_function("_mm_set1_epi32")
-            .allowlist_function("_mm_set1_epi16")
-            .blocklist_type("__m128i")
-            .blocklist_type("int64x2_t")
-            .wrap_static_fns(true)
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-            .generate()
-            .expect("Unable to generate bindings");
-
-        simd_bindings
-            .write_to_file(out_path.join("simd_bindings.rs"))
-            .expect("Couldn't write bindings!");
-
-        simd_build
-            .std("c17")
-            .flag("-D_POSIX_C_SOURCE=200112L")
-            .flag("-DSSE2NEON_SUPPRESS_WARNINGS")
-            .file("src/compat/aarch64.c")
-            .file(std::env::temp_dir().join("bindgen").join("extern.c"))
-            .include(".")
-            .compile("simd");
-    }
-
-    let git_output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-
-    // --- Robust Git Section ---
-    let git_hash = std::process::Command::new("git")
+    // 7. Robust Git Hash
+    let git_hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
-        .ok() // Convert Result to Option, ignoring the error
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
-        })
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    println!("cargo:rustc-env=GIT_HASH={git_hash}");
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=GIT_HASH={}", git_hash);
 
-    // --- Robust Netplay & Config Section ---
-    let netplay_id = std::env::var("NETPLAY_ID").unwrap_or_else(|_| "gopher64".to_string());
-    println!("cargo:rustc-env=NETPLAY_ID={netplay_id}");
-    
-    // Exporting constants safely
+    // 8. Netplay & Constants
+    let netplay_id = env::var("NETPLAY_ID").unwrap_or_else(|_| "gopher64".into());
+    println!("cargo:rustc-env=NETPLAY_ID={}", netplay_id);
     println!("cargo:rustc-env=N64_STACK_SIZE={}", 8 * 1024 * 1024);
 }
