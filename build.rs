@@ -62,7 +62,7 @@ fn main() {
         .include("parallel-rdp/parallel-rdp-standalone/volk")
         .include("parallel-rdp/parallel-rdp-standalone/vulkan")
         .include("parallel-rdp/parallel-rdp-standalone/vulkan-headers/include")
-        .include("parallel-rdp/parallel-rdp-standalone/util")
+        .include("parallel-rdp/parallel-rdp-standalone/util");
 
     // --- Robust SDL3 Environment Section ---
     let sdl3_out = std::env::var("DEP_SDL3_OUT_DIR");
