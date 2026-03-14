@@ -1,4 +1,10 @@
+#include <stdint.h>
+#include <stdlib.h>
 #include "src/compat/sse2neon/sse2neon.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // Static wrappers
 
@@ -195,3 +201,7 @@ int64_t _mm_extract_epi64__extern(__m128i __a, const int __imm8)
         abort();
     }
 }
+
+#ifdef __cplusplus
+}
+#endif
