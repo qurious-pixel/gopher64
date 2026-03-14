@@ -6,6 +6,9 @@ fn main() {
     println!("cargo::rerun-if-changed=parallel-rdp");
     println!("cargo::rerun-if-changed=src/compat");
 
+    let out_dir_var = env::var("OUT_DIR").expect("OUT_DIR not set");
+    let out_path = PathBuf::from(out_dir_var);
+    
     // 1. Slint Compilation
     let slint_config = slint_build::CompilerConfiguration::new().with_style("cosmic".into());
     if let Err(e) = slint_build::compile_with_config("src/ui/gui/appwindow.slint", slint_config) {
@@ -119,7 +122,50 @@ fn main() {
     volk_build.flag("-flto=thin").compile("volk");
     rdp_build.flag("-flto=thin").compile("parallel-rdp");
 
-    // 7. Robust Git Hash
+    // 7. Robust Bindgen for Parallel RDP
+    let rdp_header = "parallel-rdp/interface.hpp";
+    if Path::new(rdp_header).exists() {
+        bindgen::Builder::default()
+            .header(rdp_header)
+            .allowlist_function("rdp_.*") // simplified for robustness
+            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+            .generate()
+            .map(|b| b.write_to_file(out_path.join("parallel_bindings.rs")))
+            .iter().for_each(|res| if let Err(e) = res { println!("cargo:warning=Bindgen RDP failed: {}", e); });
+    }
+    
+    // 8. Robust Bindgen for SIMD (ARM64 only)
+    if arch == "aarch64" {
+        let simd_header = "src/compat/sse2neon/sse2neon.h";
+        if Path::new(simd_header).exists() {
+            let b_res = bindgen::Builder::default()
+                .header(simd_header)
+                .blocklist_type("__m128i")
+                .blocklist_type("int64x2_t")
+                .wrap_static_fns(true)
+                .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+                .generate();
+
+            match b_res {
+                Ok(bindings) => {
+                    bindings.write_to_file(out_path.join("simd_bindings.rs")).ok();
+                    // Build SIMD lib
+                    simd_build
+                        .std("c17")
+                        .flag("-D_POSIX_C_SOURCE=200112L")
+                        .flag("-DSSE2NEON_SUPPRESS_WARNINGS")
+                        .file("src/compat/aarch64.c")
+                        // Note: wrap_static_fns generates a file in OUT_DIR, not temp_dir
+                        .file(out_path.join("bindgen/extern.c")) 
+                        .include(".")
+                        .compile("simd");
+                }
+                Err(e) => println!("cargo:warning=SIMD Bindgen failed: {}", e),
+            }
+        }
+    }
+    
+    // 9. Robust Git Hash
     let git_hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -129,7 +175,7 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
 
-    // 8. Netplay & Constants
+    // 10. Netplay & Constants
     let netplay_id = env::var("NETPLAY_ID").unwrap_or_else(|_| "gopher64".into());
     println!("cargo:rustc-env=NETPLAY_ID={}", netplay_id);
     println!("cargo:rustc-env=N64_STACK_SIZE={}", 8 * 1024 * 1024);
