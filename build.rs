@@ -63,14 +63,19 @@ fn main() {
         .include("parallel-rdp/parallel-rdp-standalone/vulkan")
         .include("parallel-rdp/parallel-rdp-standalone/vulkan-headers/include")
         .include("parallel-rdp/parallel-rdp-standalone/util")
-        .include(
-            std::path::PathBuf::from(std::env::var("DEP_SDL3_OUT_DIR").to_owned().unwrap())
-                .join("include"),
-        )
-        .include(
-            std::path::PathBuf::from(std::env::var("DEP_SDL3_TTF_OUT_DIR").to_owned().unwrap())
-                .join("include"),
         );
+
+    // --- Robust SDL3 Environment Section ---
+    let sdl3_out = std::env::var("DEP_SDL3_OUT_DIR");
+    let sdl3_ttf_out = std::env::var("DEP_SDL3_TTF_OUT_DIR");
+    
+    if let (Ok(sdl3), Ok(sdl3_ttf)) = (sdl3_out, sdl3_ttf_out) {
+        rdp_build
+            .include(std::path::PathBuf::from(sdl3).join("include"))
+            .include(std::path::PathBuf::from(sdl3_ttf).join("include"));
+    } else {
+        println!("cargo:warning=SDL3 or SDL3_TTF output directories not found. Build may fail later.");
+    }
 
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
@@ -204,11 +209,27 @@ fn main() {
         .output()
         .unwrap();
 
-    let git_hash = String::from_utf8(git_output.stdout).unwrap();
+    // --- Robust Git Section ---
+    let git_hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok() // Convert Result to Option, ignoring the error
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    
     println!("cargo:rustc-env=GIT_HASH={git_hash}");
 
-    let netplay_id = std::env::var("NETPLAY_ID").unwrap_or("gopher64".to_string());
+    // --- Robust Netplay & Config Section ---
+    let netplay_id = std::env::var("NETPLAY_ID").unwrap_or_else(|_| "gopher64".to_string());
     println!("cargo:rustc-env=NETPLAY_ID={netplay_id}");
-
+    
+    // Exporting constants safely
     println!("cargo:rustc-env=N64_STACK_SIZE={}", 8 * 1024 * 1024);
 }
