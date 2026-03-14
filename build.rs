@@ -140,8 +140,9 @@ fn main() {
         if Path::new(simd_header).exists() {
             let b_res = bindgen::Builder::default()
                 .header(simd_header)
-                .clang_arg("-x")     // Add these two lines
-                .clang_arg("c++")    // to force C++ mode
+                // Force bindgen's internal clang to C++ mode
+                .clang_arg("-x")
+                .clang_arg("c++")
                 .blocklist_type("__m128i")
                 .blocklist_type("int64x2_t")
                 .wrap_static_fns(true)
@@ -152,20 +153,33 @@ fn main() {
                 Ok(bindings) => {
                     let out_file = out_path.join("simd_bindings.rs");
                     if bindings.write_to_file(&out_file).is_ok() {
-                        // Tell the compiler we successfully made the file
                         println!("cargo:rustc-cfg=simd_generated");
-                        
+    
+                        let mut simd_build = cc::Build::new();
                         simd_build
-                            .cpp(true) // Ensure the C++ compiler is used here too
-                            .std("c++17")
-                            .flag("-DSSE2NEON_SUPPRESS_WARNINGS")
+                            .cpp(true) // Crucial: sets the C++ compiler
                             .file("src/compat/aarch64.c")
-                            .file(out_path.join("bindgen/extern.c")) 
+                            .file(out_path.join("bindgen/extern.c"))
                             .include(".")
-                            .compile("simd");
+                            .define("SSE2NEON_SUPPRESS_WARNINGS", None);
+    
+                        // Handle clang-cl specific flags
+                        let compiler = simd_build.get_compiler();
+                        if compiler.is_like_clang() && cfg!(windows) {
+                            // Use /TP to force C++ compilation for .c files
+                            simd_build.flag("/TP"); 
+                            simd_build.flag("/std:c++17");
+                        } else {
+                            simd_build.std("c++17");
+                        }
+    
+                        simd_build.compile("simd");
                     }
                 }
-                Err(e) => println!("cargo:warning=SIMD Bindgen failed: {}", e),
+                Err(e) => {
+                    println!("cargo:warning=SIMD Bindgen failed: {}", e);
+                    // Do NOT call simd_build.compile here
+                }
             }
         }
     }
