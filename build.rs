@@ -140,25 +140,30 @@ fn main() {
         if Path::new(simd_header).exists() {
             let b_res = bindgen::Builder::default()
                 .header(simd_header)
+                .clang_arg("-x")     // Add these two lines
+                .clang_arg("c++")    // to force C++ mode
                 .blocklist_type("__m128i")
                 .blocklist_type("int64x2_t")
                 .wrap_static_fns(true)
                 .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
                 .generate();
-
+    
             match b_res {
                 Ok(bindings) => {
-                    bindings.write_to_file(out_path.join("simd_bindings.rs")).ok();
-                    // Build SIMD lib
-                    simd_build
-                        .std("c17")
-                        .flag("-D_POSIX_C_SOURCE=200112L")
-                        .flag("-DSSE2NEON_SUPPRESS_WARNINGS")
-                        .file("src/compat/aarch64.c")
-                        // Note: wrap_static_fns generates a file in OUT_DIR, not temp_dir
-                        .file(out_path.join("bindgen/extern.c")) 
-                        .include(".")
-                        .compile("simd");
+                    let out_file = out_path.join("simd_bindings.rs");
+                    if bindings.write_to_file(&out_file).is_ok() {
+                        // Tell the compiler we successfully made the file
+                        println!("cargo:rustc-cfg=simd_generated");
+                        
+                        simd_build
+                            .cpp(true) // Ensure the C++ compiler is used here too
+                            .std("c++17")
+                            .flag("-DSSE2NEON_SUPPRESS_WARNINGS")
+                            .file("src/compat/aarch64.c")
+                            .file(out_path.join("bindgen/extern.c")) 
+                            .include(".")
+                            .compile("simd");
+                    }
                 }
                 Err(e) => println!("cargo:warning=SIMD Bindgen failed: {}", e),
             }
